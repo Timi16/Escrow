@@ -1,11 +1,16 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::clock::Clock;
+use tensor_swap::program::TensorSwap;
+use tensor_swap::state::Pool;
 
 declare_id!("4gjmWmuanYNZTsU1vXnUSUsphL9BYBNSkh6UoU5ym9i4");
 
 // Constants for profit calculation
 pub const PROFIT_PERCENTAGE: u64 = 20; // 20% profit for correct prediction
-pub const TENSOR_ORACLE_PROGRAM_ID: &str = "TSWAPaqyCSx2KABk68Shruf4rp7CxcNi8hAsbdwmHbN";
+pub const TENSOR_SWAP_PROGRAM_ID: Pubkey = tensor_swap::ID;
+
+// Tensor Pool Seeds
+pub const POOL_SEED: &[u8] = b"pool";
 
 #[program]
 pub mod escrowfloor {
@@ -42,13 +47,15 @@ pub mod escrowfloor {
         // Transfer margin from trader to escrow account
         let cpi_accounts = anchor_lang::system_program::Transfer {
             from: trader.to_account_info(),
-            to: escrow.to_account_info(),
-        };
 
-        let cpi_program = ctx.accounts.system_program.to_account_info();
-        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
-
-        anchor_lang::system_program::transfer(cpi_ctx, margin_amount)?;
+        anchor_lang::solana_program::program::invoke(
+            &transfer_instruction,
+            &[
+                ctx.accounts.trader.to_account_info(),
+                ctx.accounts.escrow.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
 
         Ok(())
     }
@@ -64,15 +71,20 @@ pub mod escrowfloor {
         // Transfer margin + potential profit from trader B to escrow account
         let total_amount = escrow.margin_amount + escrow.profit_amount;
         
-        let cpi_accounts = anchor_lang::system_program::Transfer {
-            from: trader.to_account_info(),
-            to: escrow.to_account_info(),
-        };
+        let transfer_instruction = anchor_lang::solana_program::system_instruction::transfer(
+            &ctx.accounts.trader.key(),
+            &escrow.key(),
+            total_amount,
+        );
 
-        let cpi_program = ctx.accounts.system_program.to_account_info();
-        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
-
-        anchor_lang::system_program::transfer(cpi_ctx, total_amount)?;
+        anchor_lang::solana_program::program::invoke(
+            &transfer_instruction,
+            &[
+                ctx.accounts.trader.to_account_info(),
+                ctx.accounts.escrow.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
         
         escrow.trader_b = Some(trader.key());
         
@@ -112,8 +124,21 @@ pub mod escrowfloor {
         };
 
         // Transfer total amount to winner
-        **escrow.to_account_info().try_borrow_mut_lamports()? = 0;
-        **ctx.accounts.winner.try_borrow_mut_lamports()? += total_amount;
+        let transfer_instruction = anchor_lang::solana_program::system_instruction::transfer(
+            &escrow.key(),
+            &winner,
+            total_amount,
+        );
+
+        anchor_lang::solana_program::program::invoke_signed(
+            &transfer_instruction,
+            &[
+                ctx.accounts.escrow.to_account_info(),
+                ctx.accounts.winner.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+            &[&[b"escrow", escrow.trader_a.as_ref(), &[*ctx.bumps.get("escrow").unwrap()]]],
+        )?;
 
         escrow.settled = true;
         
@@ -136,7 +161,7 @@ pub struct InitializeEscrow<'info> {
     pub escrow: Account<'info, EscrowState>,
     
     /// CHECK: Tensor oracle program account
-    #[account(address = TENSOR_ORACLE_PROGRAM_ID.parse::<Pubkey>().unwrap())]
+    #[account(address = TENSOR_SWAP_PROGRAM_ID.parse::<Pubkey>().unwrap())]
     pub tensor_oracle: AccountInfo<'info>,
     
     pub system_program: Program<'info, System>,
@@ -163,7 +188,7 @@ pub struct SettleEscrow<'info> {
     pub escrow: Account<'info, EscrowState>,
     
     /// CHECK: Tensor oracle program account
-    #[account(address = TENSOR_ORACLE_PROGRAM_ID.parse::<Pubkey>().unwrap())]
+    #[account(address = TENSOR_SWAP_PROGRAM_ID.parse::<Pubkey>().unwrap())]
     pub tensor_oracle: AccountInfo<'info>,
     
     pub system_program: Program<'info, System>,
@@ -204,20 +229,45 @@ pub trait TensorOracle {
 
 impl TensorOracle for AccountInfo<'_> {
     fn is_initialized(&self) -> bool {
-        !self.data_is_empty()
+        // Verify this is the Tensor Swap program
+        self.key() == &TENSOR_SWAP_PROGRAM_ID
     }
 
     fn verify_collection(&self, collection_id: &str) -> bool {
-        // In production, this would make a CPI call to Tensor to verify the collection
-        // For now, we'll accept any non-empty collection ID
-        !collection_id.is_empty()
+        // Get pool address for collection
+        let (pool_address, _bump) = Pubkey::find_program_address(
+            &[POOL_SEED, collection_id.as_bytes()],
+            &TENSOR_SWAP_PROGRAM_ID,
+        );
+
+        // Try to load pool data
+        let pool_data = self.try_borrow_data().ok();
+        if let Some(data) = pool_data {
+            // Deserialize pool data using Tensor's Pool type
+            if let Ok(pool) = Pool::try_deserialize(&mut &data[..]) {
+                return pool.is_active();
+            }
+        }
+        false
     }
 
-    fn get_floor_price(&self, _collection_id: &str) -> Result<u64> {
-        // In production, this would make a CPI call to Tensor to get the current floor price
-        // For testing, we'll need to implement proper CPI calls to Tensor's oracle
-        msg!("WARNING: Using mock floor price from Tensor oracle");
-        Ok(100_000_000) // 0.1 SOL for testing
+    fn get_floor_price(&self, collection_id: &str) -> Result<u64> {
+        // Get pool address
+        let (pool_address, _bump) = Pubkey::find_program_address(
+            &[POOL_SEED, collection_id.as_bytes()],
+            &TENSOR_SWAP_PROGRAM_ID,
+        );
+
+        // CPI to Tensor Swap to get floor price
+        let cpi_program = self.to_account_info();
+        let cpi_accounts = tensor_swap::cpi::accounts::GetFloorPrice {
+            pool: pool_address,
+        };
+
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        let floor_price = tensor_swap::cpi::get_floor_price(cpi_ctx)?;
+
+        Ok(floor_price)
     }
 }
 
