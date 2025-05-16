@@ -17,8 +17,8 @@ pub mod escrowfloor {
         expiry_timestamp: i64,
         margin_amount: u64,
     ) -> Result<()> {
+        let escrow_key = ctx.accounts.escrow.key();
         let escrow = &mut ctx.accounts.escrow;
-        let tensor_oracle = &ctx.accounts.tensor_oracle;
 
         // For testing, we'll skip collection verification
         // In production, this would verify against Tensor's API
@@ -33,7 +33,7 @@ pub mod escrowfloor {
         // Transfer margin amount from trader to escrow account
         let transfer_instruction = anchor_lang::solana_program::system_instruction::transfer(
             &ctx.accounts.trader.key(),
-            &escrow.key(),
+            &escrow_key,
             margin_amount,
         );
 
@@ -50,6 +50,8 @@ pub mod escrowfloor {
     }
 
     pub fn accept_escrow(ctx: Context<AcceptEscrow>) -> Result<()> {
+        let escrow_key = ctx.accounts.escrow.key();
+        let margin_amount = ctx.accounts.escrow.margin_amount;
         let escrow = &mut ctx.accounts.escrow;
         let trader = &ctx.accounts.trader;
 
@@ -60,8 +62,8 @@ pub mod escrowfloor {
         // Transfer margin amount from trader to escrow account
         let transfer_instruction = anchor_lang::solana_program::system_instruction::transfer(
             &ctx.accounts.trader.key(),
-            &escrow.key(),
-            escrow.margin_amount,
+            &escrow_key,
+            margin_amount,
         );
 
         anchor_lang::solana_program::program::invoke(
@@ -79,6 +81,7 @@ pub mod escrowfloor {
     }
 
     pub fn settle_escrow(ctx: Context<SettleEscrow>) -> Result<()> {
+        let escrow_key = ctx.accounts.escrow.key();
         let escrow = &mut ctx.accounts.escrow;
         let tensor_oracle = &ctx.accounts.tensor_oracle;
         
@@ -102,9 +105,13 @@ pub mod escrowfloor {
         // Calculate total amount to transfer
         let total_amount = escrow.margin_amount * 2;
 
+        // Get bump and trader for seeds
+        let bump = *ctx.bumps.get("escrow").unwrap();
+        let trader_key = escrow.trader;
+
         // Transfer funds to winner
         let transfer_instruction = anchor_lang::solana_program::system_instruction::transfer(
-            &escrow.key(),
+            &escrow_key,
             &winner_key,
             total_amount,
         );
@@ -116,7 +123,7 @@ pub mod escrowfloor {
                 ctx.accounts.winner.to_account_info(),
                 ctx.accounts.system_program.to_account_info(),
             ],
-            &[&[b"escrow", escrow.trader.as_ref(), &[*ctx.bumps.get("escrow").unwrap()]]],
+            &[&[b"escrow", trader_key.as_ref(), &[bump]]],
         )?;
 
         escrow.settled = true;
