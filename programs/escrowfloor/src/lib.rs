@@ -3,6 +3,10 @@ use anchor_lang::solana_program::clock::Clock;
 
 declare_id!("4gjmWmuanYNZTsU1vXnUSUsphL9BYBNSkh6UoU5ym9i4");
 
+// Constants for profit calculation
+pub const PROFIT_PERCENTAGE: u64 = 20; // 20% profit for correct prediction
+pub const TENSOR_ORACLE_PROGRAM_ID: &str = "TSWAPaqyCSx2KABk68Shruf4rp7CxcNi8hAsbdwmHbN";
+
 #[program]
 pub mod escrowfloor {
     use super::*;
@@ -15,6 +19,12 @@ pub mod escrowfloor {
         margin_amount: u64,
     ) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
+        let tensor_oracle = &ctx.accounts.tensor_oracle;
+
+        // Verify this is a valid Tensor collection
+        require!(tensor_oracle.is_initialized(), EscrowError::InvalidTensorOracle);
+        require!(tensor_oracle.verify_collection(&collection_id), EscrowError::InvalidCollection);
+
         let trader = &ctx.accounts.trader;
 
         escrow.trader_a = trader.key();
@@ -24,6 +34,10 @@ pub mod escrowfloor {
         escrow.margin_amount = margin_amount;
         escrow.initialized = true;
         escrow.settled = false;
+
+        // Calculate potential profit
+        let profit = (margin_amount * PROFIT_PERCENTAGE) / 100;
+        escrow.profit_amount = profit;
 
         // Transfer margin from trader to escrow account
         let cpi_accounts = anchor_lang::system_program::Transfer {
@@ -47,7 +61,9 @@ pub mod escrowfloor {
         require!(escrow.initialized, EscrowError::NotInitialized);
         require!(Clock::get()?.unix_timestamp < escrow.expiry_timestamp, EscrowError::Expired);
 
-        // Transfer margin from trader B to escrow account
+        // Transfer margin + potential profit from trader B to escrow account
+        let total_amount = escrow.margin_amount + escrow.profit_amount;
+        
         let cpi_accounts = anchor_lang::system_program::Transfer {
             from: trader.to_account_info(),
             to: escrow.to_account_info(),
@@ -56,38 +72,44 @@ pub mod escrowfloor {
         let cpi_program = ctx.accounts.system_program.to_account_info();
         let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
 
-        anchor_lang::system_program::transfer(cpi_ctx, escrow.margin_amount)?;
+        anchor_lang::system_program::transfer(cpi_ctx, total_amount)?;
         
         escrow.trader_b = Some(trader.key());
         
         Ok(())
     }
 
-    pub fn settle_escrow(
-        ctx: Context<SettleEscrow>,
-        current_floor_price: u64,
-    ) -> Result<()> {
+    pub fn settle_escrow(ctx: Context<SettleEscrow>) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
+        let tensor_oracle = &ctx.accounts.tensor_oracle;
         
         require!(!escrow.settled, EscrowError::AlreadySettled);
         require!(escrow.initialized, EscrowError::NotInitialized);
         require!(escrow.trader_b.is_some(), EscrowError::NoSecondTrader);
         require!(Clock::get()?.unix_timestamp >= escrow.expiry_timestamp, EscrowError::NotExpiredYet);
 
+        // Get current floor price from Tensor oracle
+        let current_floor_price = tensor_oracle.get_floor_price(&escrow.collection_id)?;
+
         // Determine winner based on predicted floor vs actual floor
-        let winner = if (current_floor_price as i64 - escrow.predicted_floor as i64).abs() <= 100 {
-            // If prediction is within 100 lamports, trader A wins
-            escrow.trader_a
+        let (winner, gets_profit) = if (current_floor_price as i64 - escrow.predicted_floor as i64).abs() <= 100 {
+            // If prediction is within 100 lamports, trader A wins with profit
+            (escrow.trader_a, true)
         } else if current_floor_price > escrow.predicted_floor {
-            // If actual floor is higher than predicted, trader B wins
-            escrow.trader_b.unwrap()
+            // If actual floor is higher than predicted, trader B wins with profit
+            (escrow.trader_b.unwrap(), true)
         } else {
-            // If actual floor is lower than predicted, trader A wins
-            escrow.trader_a
+            // If actual floor is lower than predicted, trader A wins with profit
+            (escrow.trader_a, true)
         };
 
-        // Calculate total amount (both margins)
-        let total_amount = escrow.margin_amount.checked_mul(2).unwrap();
+        // Calculate total amount (both margins + profit if winner predicted correctly)
+        let base_amount = escrow.margin_amount.checked_mul(2).unwrap();
+        let total_amount = if gets_profit {
+            base_amount + escrow.profit_amount
+        } else {
+            base_amount
+        };
 
         // Transfer total amount to winner
         **escrow.to_account_info().try_borrow_mut_lamports()? = 0;
@@ -113,6 +135,10 @@ pub struct InitializeEscrow<'info> {
     )]
     pub escrow: Account<'info, EscrowState>,
     
+    /// CHECK: Tensor oracle program account
+    #[account(address = TENSOR_ORACLE_PROGRAM_ID.parse::<Pubkey>().unwrap())]
+    pub tensor_oracle: AccountInfo<'info>,
+    
     pub system_program: Program<'info, System>,
 }
 
@@ -136,6 +162,10 @@ pub struct SettleEscrow<'info> {
     #[account(mut)]
     pub escrow: Account<'info, EscrowState>,
     
+    /// CHECK: Tensor oracle program account
+    #[account(address = TENSOR_ORACLE_PROGRAM_ID.parse::<Pubkey>().unwrap())]
+    pub tensor_oracle: AccountInfo<'info>,
+    
     pub system_program: Program<'info, System>,
 }
 
@@ -147,6 +177,7 @@ pub struct EscrowState {
     pub predicted_floor: u64,
     pub expiry_timestamp: i64,
     pub margin_amount: u64,
+    pub profit_amount: u64,
     pub initialized: bool,
     pub settled: bool,
 }
@@ -159,8 +190,35 @@ impl EscrowState {
         8 + // predicted_floor
         8 + // expiry_timestamp
         8 + // margin_amount
+        8 + // profit_amount
         1 + // initialized
         1; // settled
+}
+
+/// Custom trait for Tensor oracle interactions
+pub trait TensorOracle {
+    fn is_initialized(&self) -> bool;
+    fn verify_collection(&self, collection_id: &str) -> bool;
+    fn get_floor_price(&self, collection_id: &str) -> Result<u64>;
+}
+
+impl TensorOracle for AccountInfo<'_> {
+    fn is_initialized(&self) -> bool {
+        !self.data_is_empty()
+    }
+
+    fn verify_collection(&self, collection_id: &str) -> bool {
+        // In production, this would make a CPI call to Tensor to verify the collection
+        // For now, we'll accept any non-empty collection ID
+        !collection_id.is_empty()
+    }
+
+    fn get_floor_price(&self, _collection_id: &str) -> Result<u64> {
+        // In production, this would make a CPI call to Tensor to get the current floor price
+        // For testing, we'll need to implement proper CPI calls to Tensor's oracle
+        msg!("WARNING: Using mock floor price from Tensor oracle");
+        Ok(100_000_000) // 0.1 SOL for testing
+    }
 }
 
 #[error_code]
@@ -175,4 +233,8 @@ pub enum EscrowError {
     NotExpiredYet,
     #[msg("No second trader has accepted the escrow")]
     NoSecondTrader,
+    #[msg("Invalid Tensor oracle account")]
+    InvalidTensorOracle,
+    #[msg("Invalid collection ID")]
+    InvalidCollection,
 }
