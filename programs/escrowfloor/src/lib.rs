@@ -106,7 +106,7 @@ pub mod escrowfloor {
         // Calculate total amount to transfer
         let total_amount = escrow.margin_amount * 2;
 
-        // Get bump from derive macro
+        // Get bump
         let bump = ctx.bumps.escrow;
 
         // Transfer funds to winner
@@ -171,7 +171,10 @@ pub struct SettleEscrow<'info> {
     #[account(mut)]
     pub winner: AccountInfo<'info>,
     
-    #[account(mut)]
+    #[account(mut,
+        seeds = [b"escrow", escrow.trader.as_ref()],
+        bump
+    )]
     pub escrow: Account<'info, EscrowState>,
     
     /// CHECK: This is Tensor's oracle account for floor price
