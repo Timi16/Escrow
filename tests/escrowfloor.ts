@@ -25,55 +25,59 @@ async function getTensorFloorPrice(slug: string): Promise<number> {
   return data.data.collectionStats.floor;
 }
 
-interface EscrowfloorIDL extends anchor.Idl {
-  version: "0.1.0";
-  name: "escrowfloor";
+const IDL = {
+  version: "0.1.0",
+  name: "escrowfloor",
+  metadata: {
+    address: "4gjmWmuanYNZTsU1vXnUSUsphL9BYBNSkh6UoU5ym9i4"
+  },
   instructions: [
     {
-      name: "initializeEscrow";
+      name: "initializeEscrow",
+      discriminator: [0],
       accounts: [
-        { name: "trader"; isMut: true; isSigner: true },
-        { name: "escrow"; isMut: true; isSigner: false },
-        { name: "tensorOracle"; isMut: false; isSigner: false },
-        { name: "systemProgram"; isMut: false; isSigner: false }
-      ];
+        { name: "trader", writable: true, signer: true },
+        { name: "escrow", writable: true, signer: false },
+        { name: "tensorOracle", writable: false, signer: false },
+        { name: "systemProgram", writable: false, signer: false }
+      ],
       args: [
-        { name: "collectionId"; type: "string" },
-        { name: "predictedFloor"; type: "u64" },
-        { name: "expiryTimestamp"; type: "i64" },
-        { name: "marginAmount"; type: "u64" }
-      ];
+        { name: "collectionId", type: "string" },
+        { name: "predictedFloor", type: "u64" },
+        { name: "expiryTimestamp", type: "i64" },
+        { name: "marginAmount", type: "u64" }
+      ]
     },
     {
-      name: "acceptEscrow";
+      name: "acceptEscrow",
+      discriminator: [1],
       accounts: [
-        { name: "trader"; isMut: true; isSigner: true },
-        { name: "escrow"; isMut: true; isSigner: false },
-        { name: "systemProgram"; isMut: false; isSigner: false }
-      ];
-      args: [];
+        { name: "trader", writable: true, signer: true },
+        { name: "escrow", writable: true, signer: false },
+        { name: "systemProgram", writable: false, signer: false }
+      ],
+      args: []
     },
     {
-      name: "settleEscrow";
+      name: "settleEscrow",
+      discriminator: [2],
       accounts: [
-        { name: "winner"; isMut: true; isSigner: false },
-        { name: "escrow"; isMut: true; isSigner: false },
-        { name: "tensorOracle"; isMut: false; isSigner: false },
-        { name: "systemProgram"; isMut: false; isSigner: false }
-      ];
-      args: [];
+        { name: "winner", writable: true, signer: false },
+        { name: "escrow", writable: true, signer: false },
+        { name: "tensorOracle", writable: false, signer: false },
+        { name: "systemProgram", writable: false, signer: false }
+      ],
+      args: []
     }
-  ];
-}
-
-type EscrowfloorProgram = Program<EscrowfloorIDL>;
+  ]
+};
 
 describe("escrowfloor", () => {
   // Configure the client to use devnet
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
-  const program = anchor.workspace.Escrowfloor as EscrowfloorProgram;
+  const program = anchor.workspace.Escrowfloor;
   
   // Tensor swap program ID
   const TENSOR_SWAP_ID = new PublicKey("TSWAPaqyCSx2KABk68Shruf4rp7CxcNi8hAsbdwmHbN");
