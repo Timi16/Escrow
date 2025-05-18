@@ -1,16 +1,5 @@
-[toolchain]
-package_manager = "yarn"
-anchor_version = "0.31.1"
-
-[features]
-resolution = true
-skip-lint = false
-
 [programs.localnet]
 escrowfloor = "4gjmWmuanYNZTsU1vXnUSUsphL9BYBNSkh6UoU5ym9i4"
-
-[registry]
-url = "https://api.apr.dev"
 
 [provider]
 cluster = "localnet"
